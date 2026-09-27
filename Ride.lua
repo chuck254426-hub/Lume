@@ -33,7 +33,7 @@ local Config = {
         "Volcanic Egg",
     },
 
-    TweenSpeed = 1500,
+    TweenSpeed = 400,
     MaxTweenTime = 20,
     HoldETime = 0.50,
 
@@ -82,12 +82,24 @@ if type(readfile) == "function" and type(isfile) == "function" and isfile(Config
         MergeConfig(Config, HttpService:JSONDecode(readfile(ConfigPath)))
     end)
 end
+-- ย้ายค่าเริ่มต้นเดิม 1500 ของไฟล์ Config ไปเป็นค่าใหม่; ค่าอื่นที่ผู้ใช้ตั้งเองยังใช้ต่อ
+if Config.TweenSpeed == 1500 then Config.TweenSpeed = 400 end
+-- เปิด UI ในโหมดตรวจสอบเสมอ; ต้องกด Auto Egg เองหลังเข้าเกม
+Config.AutoEgg = false
+-- Saved toggles are preferences, not permission to start sending gameplay remotes.
+Config.AutoBuy.Lucky = false
+Config.AutoBuy.Gear = false
+Config.AutoBuy.Food = false
+Config.SpeedHack = false
 
 --======================================================
 -- Anti AFK
 --======================================================
 
 local runtimeEnv = (getgenv and getgenv()) or _G
+local eggRunToken = {}
+runtimeEnv.HeavyEggRunToken = eggRunToken
+print("[EggHub] เริ่มโหมด Manual: Auto Egg OFF; ไม่มีการ Tween หรือกด E อัตโนมัติ")
 if runtimeEnv.HeavyEggAntiAFKConnection then
     runtimeEnv.HeavyEggAntiAFKConnection:Disconnect()
 end
@@ -100,14 +112,8 @@ local function KeepActive()
     print("[EggHub] Anti AFK ทำงานแล้ว")
 end
 runtimeEnv.HeavyEggAntiAFKConnection = LocalPlayer.Idled:Connect(KeepActive)
-local antiAfkRun = {}
-runtimeEnv.HeavyEggAntiAFKRun = antiAfkRun
-task.spawn(function()
-    while runtimeEnv.HeavyEggAntiAFKRun == antiAfkRun do
-        KeepActive() -- first action happens immediately when the script runs
-        task.wait(60)
-    end
-end)
+-- เริ่มเฝ้า Anti AFK ทันที แต่ไม่ส่งคลิกขวาตอนเพิ่งรันหรือทุก 60 วินาที
+-- เพราะคลิกดังกล่าวอาจรบกวนการถือไข่/กดเก็บด้วยมือ
 
 --======================================================
 -- Lists
@@ -433,93 +439,56 @@ local function StopTween()
     end
 end
 
-local function TweenTo(TargetPosition, ForceMaxTime)
-
-    local HRP = GetHumanoidRootPart()
-
-    if not HRP or not TargetPosition then
-        return false
-    end
-
+local function TweenTo(TargetPosition, ForceMaxTime, FixedSpeed)
+    local root = GetHumanoidRootPart()
+    if not root or not TargetPosition then return false end
     StopTween()
+    local destination = TargetPosition + Vector3.new(0, 3, 0)
+    local started = tick()
+    local speed = math.max(FixedSpeed or Config.TweenSpeed, 1)
+    local deadline, activeTween, completedConnection
+    local finished = false
 
-    local Distance = (HRP.Position - TargetPosition).Magnitude
-
-    -- เดินทางไปหาไข่ให้เร็วที่สุด
-    -- กลับบ้านจะใช้เวลาสูงสุดไม่เกิน Config.MaxTweenTime
-    local Speed = math.max(Config.TweenSpeed, 1)
-
-    local Duration
-
-    if ForceMaxTime then
-        -- ให้ระยะทางทั้งหมดจบภายใน <= 20 วินาที
-        Duration = math.min(
-            Distance / Speed,
-            Config.MaxTweenTime
-        )
-
-        -- ถ้าระยะไกลมาก ให้เร่งความเร็วเพิ่มอัตโนมัติ
-        if Distance > 0 and Duration >= Config.MaxTweenTime then
-            Duration = Config.MaxTweenTime
+    local function startSegment()
+        root = GetHumanoidRootPart()
+        if not root then return false end
+        local duration = math.max((root.Position - destination).Magnitude / speed, 0.01)
+        if ForceMaxTime then
+            duration = math.min(duration, math.max(Config.MaxTweenTime - (tick() - started), 0.01))
+            deadline = started + Config.MaxTweenTime + 0.5
+        else
+            deadline = tick() + math.max(duration + 0.5, 2)
         end
-
-    else
-        -- ไปหาไข่เร็วที่สุดที่ตั้งไว้
-        Duration = math.max(
-            Distance / Speed,
-            0.01
-        )
+        finished = false
+        activeTween = TweenService:Create(root,
+            TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+            {CFrame = CFrame.new(destination)})
+        CurrentTween = activeTween
+        completedConnection = activeTween.Completed:Connect(function() finished = true end)
+        activeTween:Play()
+        return true
     end
 
-    CurrentTween = TweenService:Create(
-        HRP,
-        TweenInfo.new(
-            Duration,
-            Enum.EasingStyle.Linear,
-            Enum.EasingDirection.Out
-        ),
-        {
-            CFrame = CFrame.new(
-                TargetPosition + Vector3.new(0, 3, 0)
-            )
-        }
-    )
-
-    local Finished = false
-
-    CurrentTween.Completed:Connect(function()
-        Finished = true
-    end)
-
-    CurrentTween:Play()
-
-    local StartTime = tick()
-    local TimeLimit = ForceMaxTime
-        and (Config.MaxTweenTime + 0.5)
-        or math.max(Duration + 0.5, 2)
-
-    while not Finished do
-
-        if tick() - StartTime >= TimeLimit then
-
+    if not startSegment() then return false end
+    while not finished do
+        if tick() >= deadline then
             StopTween()
-
-            break
+            if completedConnection then completedConnection:Disconnect() end
+            return false
         end
-
+        if not FixedSpeed and Config.TweenSpeed ~= speed then
+            speed = math.max(Config.TweenSpeed, 1)
+            if completedConnection then completedConnection:Disconnect() end
+            activeTween:Cancel()
+            if not startSegment() then return false end
+        end
         task.wait()
     end
-
-    CurrentTween = nil
-
-    -- ถ้าปิด Auto Egg ระหว่าง Tween ให้ถือว่าเป็นการยกเลิก
-    if not Config.AutoEgg and not ForceMaxTime then
-        return false
-    end
-
+    if completedConnection then completedConnection:Disconnect() end
+    if CurrentTween == activeTween then CurrentTween = nil end
+    if not Config.AutoEgg and not ForceMaxTime then return false end
     return true
 end
-
 local function GetEggTopPosition(egg)
     if egg:IsA("BasePart") then
         return egg.Position + Vector3.new(0, egg.Size.Y / 2, 0)
@@ -531,11 +500,11 @@ local function GetEggTopPosition(egg)
     return GetObjectPosition(egg)
 end
 
-local function TweenToVolcanicEgg(egg, testRoute)
-    print("[Volcanic Route v32] ลดความเร็วก่อนถึงเกาะ | 350 ผ่านทางเข้า")
-    if not Config.AutoEgg or (not testRoute and (not egg or egg.Name ~= "Volcanic Egg")) then return false end
+local function TweenToVolcanicEgg(egg, testOnly)
+    print("[Volcanic Route v34] เส้นทางไข่จริง | ความเร็วแยกจากช่อง UI")
+    if not Config.AutoEgg or (not testOnly and (not egg or egg.Name ~= "Volcanic Egg")) then return false end
     local folder = GetEggFolder()
-    if not testRoute and (not folder or egg.Parent ~= folder) then
+    if not testOnly and (not folder or egg.Parent ~= folder) then
         warn("[Volcanic] ยังไม่มีไข่จริงใน RenderedEggs")
         return false
     end
@@ -962,14 +931,13 @@ local function TweenToVolcanicEgg(egg, testRoute)
     local spawnFolder = workspace:FindFirstChild("EggSpawns")
     local eggSpawn = spawnFolder and spawnFolder:FindFirstChild("Volcanic")
     if not eggSpawn then
-        warn("[Volcanic Test] ไม่พบ EggSpawns.Volcanic")
+        warn("[Volcanic] ไม่พบ EggSpawns.Volcanic")
         return false
     end
     
     local root = GetHumanoidRootPart()
     if not root then return false end
-    local previousSpeed = Config.TweenSpeed
-    Config.TweenSpeed = 1500 -- ใช้เฉพาะช่วงที่ยังห่างจากทางเข้าเกาะ
+    local volcanicSpeed = 1500 -- ใช้เฉพาะช่วงที่ยังห่างจากทางเข้าเกาะ
     local island = workspace:FindFirstChild("Volcano")
     island = island and island:FindFirstChild("VolcanoIsland")
     local zone = island and island:FindFirstChild("volcano")
@@ -995,21 +963,23 @@ local function TweenToVolcanicEgg(egg, testRoute)
         local current = GetHumanoidRootPart()
         if enteredZone or not current or not insideZone(current.Position) then return end
         enteredZone = true
-        Config.TweenSpeed = 150
+        volcanicSpeed = 150
         if CurrentTween then
             zoneInterrupted = true
             StopTween() -- ตัด Tween ที่เริ่มด้วยความเร็วเดิม แล้วคำนวณช่วงที่เหลือใหม่
         end
-        print("[Volcanic Route v32] เข้าโซน volcano: ปรับความเร็วเป็น 150")
+        print("[Volcanic Route v34] เข้าโซน volcano: ปรับความเร็วเป็น 150")
     end
-    if not zone then warn("[Volcanic Route v32] ไม่พบโซน VolcanoIsland.volcano") end
+    if not zone then warn("[Volcanic Route v34] ไม่พบโซน VolcanoIsland.volcano") end
     zoneConnection = RunService.Heartbeat:Connect(updateZoneSpeed)
     updateZoneSpeed()
+    -- The working v32 route disables character collisions after the entrance.
+    -- Keep it scoped to this route and restore each part on every exit.
     local collisionState = {}
     local noclipConnection
     local function enableRouteNoclip()
         local character = LocalPlayer.Character
-        if not character then return end
+        if not character or noclipConnection then return end
         noclipConnection = RunService.Stepped:Connect(function()
             if LocalPlayer.Character ~= character then return end
             for _, part in ipairs(character:GetDescendants()) do
@@ -1024,14 +994,10 @@ local function TweenToVolcanicEgg(egg, testRoute)
     end
     local function finish(ok)
         if zoneConnection then zoneConnection:Disconnect(); zoneConnection = nil end
-        if noclipConnection then
-            noclipConnection:Disconnect()
-            noclipConnection = nil
-        end
+        if noclipConnection then noclipConnection:Disconnect(); noclipConnection = nil end
         for part, wasCollidable in pairs(collisionState) do
             if part.Parent then part.CanCollide = wasCollidable end
         end
-        Config.TweenSpeed = previousSpeed
         return ok
     end
     local function moveTo(target, label, precise)
@@ -1047,18 +1013,18 @@ local function TweenToVolcanicEgg(egg, testRoute)
         end
         local previousDistance = math.huge
         for attempt = 1, 4 do
-            if not Config.AutoEgg or (not testRoute and egg.Parent ~= folder) then return false end
+            if not Config.AutoEgg or (not testOnly and egg.Parent ~= folder) then return false end
             local now = GetHumanoidRootPart()
             if not now then return false end
             local distance = (target - now.Position).Magnitude
             if reached(now.Position) then return true end
             if attempt > 1 and distance >= previousDistance - 3 and not precise and not zoneInterrupted then
-                warn("[Volcanic Route v32] จุด", label, "ไม่คืบหน้า หยุดลองซ้ำ:", now.Position)
+                warn("[Volcanic Route v34] จุด", label, "ไม่คืบหน้า หยุดลองซ้ำ:", now.Position)
                 return false
             end
             previousDistance = distance
             -- TweenTo adds 3 studs to its input. Pass the HRP destination minus 3.
-            if not TweenTo(target - Vector3.new(0, 3, 0)) then return false end
+            if not TweenTo(target - Vector3.new(0, 3, 0), false, volcanicSpeed) then return false end
             if zoneInterrupted then
                 zoneInterrupted = false
                 previousDistance = math.huge
@@ -1084,41 +1050,27 @@ local function TweenToVolcanicEgg(egg, testRoute)
         local approachTarget = startPosition - approachDelta.Unit * islandApproachDistance
         if not moveTo(approachTarget, "ก่อนเข้าเขตเกาะ") then return finish(false) end
     end
-    if not enteredZone then Config.TweenSpeed = 350 end
-    print("[Volcanic Route v32] ทางเข้าความเร็ว", Config.TweenSpeed, "จุดเริ่ม:", startPosition)
+    if not enteredZone then volcanicSpeed = 350 end
+    print("[Volcanic Route v34] ทางเข้าความเร็ว", volcanicSpeed, "จุดเริ่ม:", startPosition)
     for index, position in ipairs(route) do
         if index == 1 or index % 25 == 0 or index == #route then
             print("[Volcanic] จุดทางเดิน", index, "/", #route, "| เป้าหมาย:", position)
         end
         if not moveTo(position, "จุดเดิน " .. index, true) then return finish(false) end
-        if index == 1 then
-            enableRouteNoclip() -- หลีกเลี่ยงชนพร็อพและผนังขณะลงช่อง
-        end
+        if index == 1 then enableRouteNoclip() end
     end
     -- จุดสุดท้ายในไฟล์บันทึกอาจอยู่ห่างจุดเกิดไข่: เดินไปยัง Part หลังผ่านเส้นทาง
     if not moveTo(GetObjectPosition(eggSpawn) + Vector3.new(0, 2.5, 0), "EggSpawns.Volcanic") then
         return finish(false)
     end
-    if testRoute then
-        print("[Volcanic Test] ถึงจุดไข่เกิดแล้ว (ไม่ได้กด E)")
-        return finish(true)
-    end
-
-    -- หลังเข้าทางประตูแล้ว จึงไปยังไข่จริงที่ RenderedEggs
+    if testOnly then return finish(true) end
+    -- Once through the Volcanic route, approach the real egg using the same
+    -- arrival logic as other eggs. CollectEggUntilSuccess handles E and return.
     local top = GetEggTopPosition(egg)
-    if not top or not moveTo(top + Vector3.new(0, 2.5, 0), "RenderedEggs.Volcanic Egg") then
+    if not top or not TweenTo(top, false, volcanicSpeed) then
         return finish(false)
     end
-    local destination = top + Vector3.new(0, 2.5, 0)
-    root = GetHumanoidRootPart()
-    if not root or (root.Position - destination).Magnitude > 12 then return finish(false) end
-    task.wait(0.4)
-    root = GetHumanoidRootPart()
-    top = GetEggTopPosition(egg)
-    -- ตำแหน่งโมเดลไข่และตำแหน่ง prompt อาจไม่อยู่จุดเดียวกัน
-    -- ให้ขั้นตอนกด E ลองต่อเมื่ออยู่ใกล้ไข่ แทนการยกเลิกจากคลาดเคลื่อนเล็กน้อย
-    return finish(root ~= nil and top ~= nil and egg.Parent == folder
-        and (root.Position - (top + Vector3.new(0, 2.5, 0))).Magnitude <= 12)
+    return finish(true)
 end
 
 --======================================================
@@ -1417,20 +1369,164 @@ end
 -- Return Home
 --======================================================
 
-local function ReturnHome()
-    local HomePosition = GetHomePosition()
+local function ReturnHome(eggName, collectedAt)
+    local home = GetHomePosition()
+    if not home then
+        warn("[EggHub] ไม่พบ Baseplate ใน Plot ของตัวเอง")
+        return false
+    end
+    -- ปุ่ม Home ใน UI ไม่มีไข่ที่ต้องวาง
+    if not eggName then
+        return TweenTo(home, true, 140)
+    end
+    local current = GetHumanoidRootPart()
+    local plot = FindMyPlot()
+    local base = plot and plot:FindFirstChild("Baseplate", true)
+    if not current or not base or not base:IsA("BasePart") then return false end
 
-    if not HomePosition then
-        warn(
-            "[EggHub] ไม่พบ Baseplate ใน Plot ของตัวเอง"
-        )
-
+    -- วางไข่ก่อนถึงขอบ Baseplate ทางด้านที่เดินเข้ามา
+    local outward = Vector3.new(current.Position.X - home.X, 0, current.Position.Z - home.Z)
+    if outward.Magnitude < 1 then outward = base.CFrame.LookVector * -1 end
+    outward = Vector3.new(outward.X, 0, outward.Z).Unit
+    local localDirection = base.CFrame:VectorToObjectSpace(outward)
+    local edge = math.min(
+        localDirection.X ~= 0 and base.Size.X / (2 * math.abs(localDirection.X)) or math.huge,
+        localDirection.Z ~= 0 and base.Size.Z / (2 * math.abs(localDirection.Z)) or math.huge
+    )
+    local outside = home + outward * (edge + 65)
+    local dropPoint = Vector3.new(outside.X, home.Y + 8, outside.Z)
+    local deadline = (collectedAt or tick()) + 18
+    local remainingDistance = (current.Position - dropPoint).Magnitude + (dropPoint - home).Magnitude
+    local function timedMove(target, reserve)
+        if not Config.AutoEgg then return false end
+        local remaining = deadline - tick() - reserve
+        if remaining <= 0 then
+            warn("[EggHub] เวลา 18 วินาทีไม่พอสำหรับเส้นทางนี้")
+            return false
+        end
+        local root = GetHumanoidRootPart()
+        if not root then return false end
+        local distance = (root.Position - target).Magnitude
+        local speed = math.max(140, remainingDistance / remaining)
+        remainingDistance = math.max(0, remainingDistance - distance)
+        return TweenTo(target - Vector3.new(0, 3, 0), false, speed)
+    end
+    if not timedMove(dropPoint, 3.5) then
+        warn("[EggHub] ไปยังจุดวางไข่ไม่สำเร็จ")
+        return false
+    end
+    local dropEvent = ReplicatedStorage:FindFirstChild("Remotes")
+    dropEvent = dropEvent and dropEvent:FindFirstChild("Game")
+    dropEvent = dropEvent and dropEvent:FindFirstChild("BasketDrop")
+    if not dropEvent or not dropEvent:IsA("RemoteEvent") then
+        warn("[EggHub] ไม่พบ RemoteEvent BasketDrop; หยุดก่อนเข้าโซนบ้าน")
+        return false
+    end
+    -- เก็บรายการ prompt เดิม เพื่อให้เลือกจุดกดของไข่ที่เพิ่งวาง
+    local knownPrompts = {}
+    for _, instance in ipairs(workspace:GetDescendants()) do
+        if instance:IsA("ProximityPrompt") then knownPrompts[instance] = true end
+    end
+    local dropped = pcall(function() dropEvent:FireServer() end)
+    if not dropped then
+        warn("[EggHub] เรียก BasketDrop ไม่สำเร็จ")
         return false
     end
 
-    print("[EggHub] กำลังกลับบ้าน...")
+    local function findDroppedPrompt()
+        local selected, bestScore
+        for _, prompt in ipairs(workspace:GetDescendants()) do
+            if prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                local part = prompt:FindFirstAncestorWhichIsA("BasePart")
+                if part then
+                    local distance = (part.Position - dropPoint).Magnitude
+                    local label = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. part.Name):lower()
+                    local matchesEgg = label:find("egg", 1, true)
+                        or label:find("ไข่", 1, true)
+                        or label:find(eggName:lower(), 1, true)
+                    if distance <= 25 and (not knownPrompts[prompt] or matchesEgg) then
+                        local score = distance + (knownPrompts[prompt] and 15 or 0)
+                        if not bestScore or score < bestScore then
+                            selected, bestScore = prompt, score
+                        end
+                    end
+                end
+            end
+        end
+        return selected
+    end
 
-    return TweenTo(HomePosition, true)
+    local prompt
+    local promptDeadline = math.min(deadline - 1.5, tick() + 3)
+    while tick() < promptDeadline and Config.AutoEgg do
+        prompt = findDroppedPrompt()
+        if prompt then break end
+        task.wait(0.1)
+    end
+    if not prompt then
+        warn("[EggHub] ไข่ที่วางยังไม่มี ProximityPrompt ให้กด E; หยุดก่อนเข้าโซนบ้าน")
+        return false
+    end
+    local promptPart = prompt:FindFirstAncestorWhichIsA("BasePart")
+    local root = GetHumanoidRootPart()
+    if not promptPart or not root then return false end
+    if (root.Position - promptPart.Position).Magnitude > math.max(2, prompt.MaxActivationDistance - 1) then
+        if not timedMove(promptPart.Position + Vector3.new(0, 2.5, 0), 1.5) then return false end
+    end
+    local triggered = false
+    local connection = prompt.Triggered:Connect(function(player)
+        if player == LocalPlayer then triggered = true end
+    end)
+    for attempt = 1, 3 do
+        if tick() >= deadline - 0.5 or not Config.AutoEgg then break end
+        local hold = math.max(prompt.HoldDuration + 0.3, 0.7)
+        print("[EggHub] กำลังกดเก็บไข่ที่วาง:", eggName, "| ครั้ง:", attempt, "| ถือ E:", hold)
+        local focused = UserInputService:GetFocusedTextBox()
+        if focused then focused:ReleaseFocus() end
+        local ok = pcall(function() prompt:InputHoldBegin() end)
+        if not ok then
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        end
+        task.wait(hold)
+        if ok then
+            pcall(function() prompt:InputHoldEnd() end)
+        else
+            ReleaseE()
+        end
+        local updateDeadline = math.min(deadline - 0.5, tick() + 0.5)
+        repeat
+            task.wait(0.1)
+        until tick() >= updateDeadline or not prompt.Parent or not prompt.Enabled
+            or not promptPart:IsDescendantOf(workspace)
+        if not prompt.Parent or not prompt.Enabled
+            or not promptPart:IsDescendantOf(workspace) then break end
+    end
+    connection:Disconnect()
+    local pickedUp = not prompt.Parent or not prompt.Enabled
+        or not promptPart:IsDescendantOf(workspace)
+    if not pickedUp then
+        warn("[EggHub] กด E แล้ว แต่ไข่ที่วางยังอยู่ (PromptTriggered:", triggered,
+            "); หยุดก่อนเข้าโซนบ้าน")
+        return false
+    end
+    if not Config.AutoEgg then return false end
+    print("[EggHub] เก็บไข่ที่วางแล้ว กำลังเข้าโซนบ้าน:", eggName)
+    local arrived = timedMove(home + Vector3.new(0, 3, 0), 0)
+    if arrived then
+        task.wait(0.15)
+        local root = GetHumanoidRootPart()
+        arrived = root ~= nil and (root.Position - home).Magnitude <= 30
+        if arrived and tick() > deadline then
+            warn("[EggHub] ถึงบ้านเกิน 18 วินาที; เกมอาจคืนไข่")
+            return false
+        end
+        if arrived then
+            print("[EggHub] ถึงบ้านหลังเก็บไข่", math.floor((tick() - (collectedAt or tick())) * 10) / 10, "วินาที")
+        else
+            warn("[EggHub] เกมดึงตัวกลับก่อนถึงโซนบ้าน")
+        end
+    end
+    return arrived
 end
 
 --======================================================
@@ -1439,7 +1535,7 @@ end
 
 task.spawn(function()
 
-    while task.wait(0.25) do
+    while task.wait(0.25) and runtimeEnv.HeavyEggRunToken == eggRunToken do
 
         if Config.AutoEgg and not Busy then
 
@@ -1493,7 +1589,12 @@ task.spawn(function()
                     end
 
                     -- กลับบ้านหลังจากเก็บสำเร็จเท่านั้น
-                    ReturnHome()
+                    if not ReturnHome(Egg.Name, LastCollectedTime) then
+                        warn("[EggHub] กลับบ้านไม่สำเร็จ หยุด Auto Egg เพื่อไม่ทิ้งไข่ที่วาง")
+                        Config.AutoEgg = false
+                        Busy = false
+                        continue
+                    end
 
                     -- รอให้ RenderedEggs รีเฟรช
                     task.wait(0.50)
@@ -1582,11 +1683,12 @@ end
 --======================================================
 
 task.spawn(function()
-    while task.wait(Config.AutoBuy.CheckDelay) do
+    while task.wait(Config.AutoBuy.CheckDelay) and runtimeEnv.HeavyEggRunToken == eggRunToken do
         if Config.AutoBuy.Gear then
             local Selected = BuildSelectedSet(Config.AutoBuy.GearSelected)
 
             for _, ItemName in ipairs(GearList) do
+                if runtimeEnv.HeavyEggRunToken ~= eggRunToken then break end
                 if not Config.AutoBuy.Gear then
                     break
                 end
@@ -1594,7 +1696,7 @@ task.spawn(function()
                 if Selected[ItemName] then
                     local KeepBuying = true
 
-                    while Config.AutoBuy.Gear and KeepBuying do
+                    while Config.AutoBuy.Gear and KeepBuying and runtimeEnv.HeavyEggRunToken == eggRunToken do
                         KeepBuying = false
 
                         if BuyItem("Gear", ItemName) then
@@ -1624,11 +1726,12 @@ end)
 --======================================================
 
 task.spawn(function()
-    while task.wait(Config.AutoBuy.CheckDelay) do
+    while task.wait(Config.AutoBuy.CheckDelay) and runtimeEnv.HeavyEggRunToken == eggRunToken do
         if Config.AutoBuy.Food then
             local Selected = BuildSelectedSet(Config.AutoBuy.FoodSelected)
 
             for _, ItemName in ipairs(FoodList) do
+                if runtimeEnv.HeavyEggRunToken ~= eggRunToken then break end
                 if not Config.AutoBuy.Food then
                     break
                 end
@@ -1636,7 +1739,7 @@ task.spawn(function()
                 if Selected[ItemName] then
                     local KeepBuying = true
 
-                    while Config.AutoBuy.Food and KeepBuying do
+                    while Config.AutoBuy.Food and KeepBuying and runtimeEnv.HeavyEggRunToken == eggRunToken do
                         KeepBuying = false
 
                         if BuyItem("Food", ItemName) then
@@ -1724,7 +1827,7 @@ local function CanUpgradeLucky()
 end
 
 task.spawn(function()
-    while task.wait(0.05) do
+    while task.wait(0.05) and runtimeEnv.HeavyEggRunToken == eggRunToken do
         if Config.AutoBuy.Lucky then
             if CanUpgradeLucky() then
                 UpLuck()
@@ -1756,8 +1859,6 @@ local function UpdateSpeed()
 
     if Config.SpeedHack then
         HumanoidObj.WalkSpeed = Config.SpeedValue
-    else
-        HumanoidObj.WalkSpeed = 16
     end
 end
 
@@ -1768,13 +1869,11 @@ LocalPlayer.CharacterAdded:Connect(function(CharacterObj)
 
     if Config.SpeedHack then
         HumanoidObj.WalkSpeed = Config.SpeedValue
-    else
-        HumanoidObj.WalkSpeed = 16
     end
 end)
 
 task.spawn(function()
-    while task.wait(0.25) do
+    while task.wait(0.25) and runtimeEnv.HeavyEggRunToken == eggRunToken do
         if Config.SpeedHack then
             UpdateSpeed()
         end
@@ -2213,30 +2312,50 @@ do
             local previous = Config.AutoEgg
             Config.AutoEgg = true
             local egg, position = FindEnabledEgg()
-            if egg and position and CollectEggUntilSuccess(egg, position) then ReturnHome() end
+            if egg and position and CollectEggUntilSuccess(egg, position) then ReturnHome(egg.Name, LastCollectedTime) end
             Config.AutoEgg = previous
             Busy = false
         end)
     end)
-    button(auto, "Test Volcanic Route", UDim2.fromOffset(150, 275), UDim2.fromOffset(170, 30), function()
-        if Busy then return end
+    local volcanicTestStatus = label(auto, "", UDim2.fromOffset(5, 304), UDim2.fromOffset(465, 16), textColor, 11)
+    button(auto, "Test Volcanic", UDim2.fromOffset(151, 275), UDim2.fromOffset(160, 30), function()
+        if Busy or Config.AutoEgg then
+            volcanicTestStatus.Text = "ปิด Auto Egg และรอให้งานปัจจุบันจบก่อน"
+            return
+        end
+        Busy = true
+        volcanicTestStatus.Text = "กำลังตรวจหาไข่ Volcanic..."
         task.spawn(function()
-            Busy = true
-            local previous = Config.AutoEgg
+            -- Busy blocks the normal farm loop during this one-off test.
             Config.AutoEgg = true
-            local ok = TweenToVolcanicEgg(nil, true)
-            if ok then
-                -- กลับบ้านได้แม้ไข่ยังไม่เกิด และไม่แตะ logic นับไข่
-                ReturnHome()
-            else
-                warn("[Volcanic Test] ไปไม่ถึงจุดไข่เกิด ดูจุดล่าสุดใน Output")
-            end
-            Config.AutoEgg = previous
+            local ok, reached = pcall(function()
+                local folder = GetEggFolder()
+                local egg = folder and folder:FindFirstChild("Volcanic Egg")
+                if egg and GetObjectPosition(egg) then
+                    volcanicTestStatus.Text = "พบไข่จริง: กำลังเดิน เก็บ และกลับบ้าน..."
+                    if not CollectEggUntilSuccess(egg, GetObjectPosition(egg)) then
+                        return false
+                    end
+                    return ReturnHome(egg.Name, LastCollectedTime)
+                end
+                volcanicTestStatus.Text = "ไข่ยังไม่เกิด: ทดสอบเส้นทางถึงจุดเกิด..."
+                return TweenToVolcanicEgg(nil, true)
+            end)
+            Config.AutoEgg = false
+            StopTween()
+            ReleaseE()
             Busy = false
+            volcanicTestStatus.Text = ok and (reached and "ทดสอบเสร็จ: ดู Output ว่าเก็บไข่หรือถึงจุดเกิด" or "ทดสอบไม่สำเร็จ: ดู Output")
+                or "เกิดข้อผิดพลาด: ดู Output"
+            if not ok then warn("[Volcanic Test]", reached) end
         end)
     end)
-    line(auto, 320, "Tween Speed", Config.TweenSpeed, function(v)
+    local tweenSpeedInput = line(auto, 320, "Tween Speed", Config.TweenSpeed, function(v)
         Config.TweenSpeed = math.clamp(tonumber(v) or Config.TweenSpeed, 100, 100000)
+    end)
+    tweenSpeedInput:GetPropertyChangedSignal("Text"):Connect(function()
+        local speed = tonumber(tweenSpeedInput.Text)
+        if speed then Config.TweenSpeed = math.clamp(speed, 100, 100000) end
     end)
     line(auto, 362, "Hold E Time (seconds)", Config.HoldETime, function(v)
         Config.HoldETime = math.clamp(tonumber(v) or Config.HoldETime, 0.1, 2)
