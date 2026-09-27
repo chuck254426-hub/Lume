@@ -11,6 +11,7 @@ repeat task.wait() until game:IsLoaded()
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local VirtualUser = game:GetService("VirtualUser")
 local UserInputService = game:GetService("UserInputService")
@@ -531,6 +532,7 @@ local function GetEggTopPosition(egg)
 end
 
 local function TweenToVolcanicEgg(egg, testRoute)
+    print("[Volcanic Route v32] ลดความเร็วก่อนถึงเกาะ | 350 ผ่านทางเข้า")
     if not Config.AutoEgg or (not testRoute and (not egg or egg.Name ~= "Volcanic Egg")) then return false end
     local folder = GetEggFolder()
     if not testRoute and (not folder or egg.Parent ~= folder) then
@@ -967,8 +969,68 @@ local function TweenToVolcanicEgg(egg, testRoute)
     local root = GetHumanoidRootPart()
     if not root then return false end
     local previousSpeed = Config.TweenSpeed
-    Config.TweenSpeed = 1500 -- เดินทางไปยังจุดเริ่มของเส้นทาง
+    Config.TweenSpeed = 1500 -- ใช้เฉพาะช่วงที่ยังห่างจากทางเข้าเกาะ
+    local island = workspace:FindFirstChild("Volcano")
+    island = island and island:FindFirstChild("VolcanoIsland")
+    local zone = island and island:FindFirstChild("volcano")
+    local zoneConnection
+    local enteredZone = false
+    local zoneInterrupted = false
+    local function insideZone(position)
+        if not zone then return false end
+        local frame, size
+        if zone:IsA("BasePart") then
+            frame, size = zone.CFrame, zone.Size
+        elseif zone:IsA("Model") then
+            local ok, cf, bounds = pcall(function() return zone:GetBoundingBox() end)
+            if ok then frame, size = cf, bounds end
+        end
+        if not frame then return false end
+        local offset = frame:PointToObjectSpace(position)
+        return math.abs(offset.X) <= size.X / 2 + 10
+            and math.abs(offset.Y) <= size.Y / 2 + 10
+            and math.abs(offset.Z) <= size.Z / 2 + 10
+    end
+    local function updateZoneSpeed()
+        local current = GetHumanoidRootPart()
+        if enteredZone or not current or not insideZone(current.Position) then return end
+        enteredZone = true
+        Config.TweenSpeed = 150
+        if CurrentTween then
+            zoneInterrupted = true
+            StopTween() -- ตัด Tween ที่เริ่มด้วยความเร็วเดิม แล้วคำนวณช่วงที่เหลือใหม่
+        end
+        print("[Volcanic Route v32] เข้าโซน volcano: ปรับความเร็วเป็น 150")
+    end
+    if not zone then warn("[Volcanic Route v32] ไม่พบโซน VolcanoIsland.volcano") end
+    zoneConnection = RunService.Heartbeat:Connect(updateZoneSpeed)
+    updateZoneSpeed()
+    local collisionState = {}
+    local noclipConnection
+    local function enableRouteNoclip()
+        local character = LocalPlayer.Character
+        if not character then return end
+        noclipConnection = RunService.Stepped:Connect(function()
+            if LocalPlayer.Character ~= character then return end
+            for _, part in ipairs(character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    if collisionState[part] == nil then
+                        collisionState[part] = part.CanCollide
+                    end
+                    part.CanCollide = false
+                end
+            end
+        end)
+    end
     local function finish(ok)
+        if zoneConnection then zoneConnection:Disconnect(); zoneConnection = nil end
+        if noclipConnection then
+            noclipConnection:Disconnect()
+            noclipConnection = nil
+        end
+        for part, wasCollidable in pairs(collisionState) do
+            if part.Parent then part.CanCollide = wasCollidable end
+        end
         Config.TweenSpeed = previousSpeed
         return ok
     end
@@ -976,46 +1038,61 @@ local function TweenToVolcanicEgg(egg, testRoute)
         local tolerance = precise and 2.5 or 10
         local function reached(position)
             if precise then
-                -- HRP ขณะเดินอาจสูง/ต่ำกว่าจุดที่บันทึกจากแรงโน้มถ่วงราว 3 studs
+                -- ตำแหน่ง HRP อาจสูงกว่าจุดบันทึกเมื่อเกมพยุงตัวบนพร็อพ
                 local delta = target - position
                 return Vector3.new(delta.X, 0, delta.Z).Magnitude <= 3
-                    and math.abs(delta.Y) <= 6
+                    and math.abs(delta.Y) <= 9
             end
             return (target - position).Magnitude <= tolerance
         end
         local previousDistance = math.huge
-        for attempt = 1, 3 do
+        for attempt = 1, 4 do
             if not Config.AutoEgg or (not testRoute and egg.Parent ~= folder) then return false end
             local now = GetHumanoidRootPart()
             if not now then return false end
             local distance = (target - now.Position).Magnitude
             if reached(now.Position) then return true end
-            if attempt > 1 and distance >= previousDistance - 3 then
-                warn("[Volcanic] จุด", label, "ไม่คืบหน้า หยุดลองซ้ำ:", now.Position)
+            if attempt > 1 and distance >= previousDistance - 3 and not precise and not zoneInterrupted then
+                warn("[Volcanic Route v32] จุด", label, "ไม่คืบหน้า หยุดลองซ้ำ:", now.Position)
                 return false
             end
             previousDistance = distance
             -- TweenTo adds 3 studs to its input. Pass the HRP destination minus 3.
             if not TweenTo(target - Vector3.new(0, 3, 0)) then return false end
-            now = GetHumanoidRootPart()
-            if not now then return false end
-            if reached(now.Position) or (not precise and (now.Position - target).Magnitude <= 15) then
-                return Config.AutoEgg
+            if zoneInterrupted then
+                zoneInterrupted = false
+                previousDistance = math.huge
+            else
+                now = GetHumanoidRootPart()
+                if not now then return false end
+                if reached(now.Position) or (not precise and (now.Position - target).Magnitude <= 15) then
+                    return Config.AutoEgg
+                end
+                warn("[Volcanic] เกมดึงตัวกลับระหว่างทางที่จุด", label,
+                    "| ลอง:", attempt, "| ตำแหน่ง:", now.Position)
+                task.wait(0.35)
             end
-            warn("[Volcanic] เกมดึงตัวกลับระหว่างทางที่จุด", label,
-                "| ลอง:", attempt, "| ตำแหน่ง:", now.Position)
-            task.wait(0.35)
         end
-        warn("[Volcanic] ไปไม่ถึงจุดหลังลอง 3 ครั้ง:", label)
+        warn("[Volcanic] ไปไม่ถึงจุดหลังลอง 4 ครั้ง:", label)
         return false
     end
+    -- ลดความเร็วก่อนถึงเขตเกาะ เพื่อให้เกมรับการเข้าประตูตามปกติ
+    local islandApproachDistance = 1200
+    local startPosition = route[1]
+    local approachDelta = startPosition - root.Position
+    if approachDelta.Magnitude > islandApproachDistance then
+        local approachTarget = startPosition - approachDelta.Unit * islandApproachDistance
+        if not moveTo(approachTarget, "ก่อนเข้าเขตเกาะ") then return finish(false) end
+    end
+    if not enteredZone then Config.TweenSpeed = 350 end
+    print("[Volcanic Route v32] ทางเข้าความเร็ว", Config.TweenSpeed, "จุดเริ่ม:", startPosition)
     for index, position in ipairs(route) do
         if index == 1 or index % 25 == 0 or index == #route then
             print("[Volcanic] จุดทางเดิน", index, "/", #route, "| เป้าหมาย:", position)
         end
         if not moveTo(position, "จุดเดิน " .. index, true) then return finish(false) end
         if index == 1 then
-            Config.TweenSpeed = 350 -- เดินตามจุดที่บันทึกไว้หลังถึงจุดเริ่ม
+            enableRouteNoclip() -- หลีกเลี่ยงชนพร็อพและผนังขณะลงช่อง
         end
     end
     -- จุดสุดท้ายในไฟล์บันทึกอาจอยู่ห่างจุดเกิดไข่: เดินไปยัง Part หลังผ่านเส้นทาง
