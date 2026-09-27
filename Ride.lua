@@ -1358,156 +1358,25 @@ local function ReturnHome(eggName, collectedAt)
         warn("[EggHub] ไม่พบ Baseplate ใน Plot ของตัวเอง")
         return false
     end
-    -- ปุ่ม Home ใน UI ไม่มีไข่ที่ต้องวาง
-    if not eggName then
-        return TweenTo(home, true, 140)
-    end
-    local current = GetHumanoidRootPart()
-    local plot = FindMyPlot()
-    local base = plot and plot:FindFirstChild("Baseplate", true)
-    if not current or not base or not base:IsA("BasePart") then return false end
-
-    -- วางไข่ก่อนถึงขอบ Baseplate ทางด้านที่เดินเข้ามา
-    local outward = Vector3.new(current.Position.X - home.X, 0, current.Position.Z - home.Z)
-    if outward.Magnitude < 1 then outward = base.CFrame.LookVector * -1 end
-    outward = Vector3.new(outward.X, 0, outward.Z).Unit
-    local localDirection = base.CFrame:VectorToObjectSpace(outward)
-    local edge = math.min(
-        localDirection.X ~= 0 and base.Size.X / (2 * math.abs(localDirection.X)) or math.huge,
-        localDirection.Z ~= 0 and base.Size.Z / (2 * math.abs(localDirection.Z)) or math.huge
-    )
-    local outside = home + outward * (edge + 65)
-    local dropPoint = Vector3.new(outside.X, home.Y + 8, outside.Z)
-    local deadline = (collectedAt or tick()) + 18
-    local remainingDistance = (current.Position - dropPoint).Magnitude + (dropPoint - home).Magnitude
-    local function timedMove(target, reserve)
-        if not Config.AutoEgg then return false end
-        local remaining = deadline - tick() - reserve
-        if remaining <= 0 then
-            warn("[EggHub] เวลา 18 วินาทีไม่พอสำหรับเส้นทางนี้")
-            return false
-        end
-        local root = GetHumanoidRootPart()
-        if not root then return false end
-        local distance = (root.Position - target).Magnitude
-        local speed = math.max(140, remainingDistance / remaining)
-        remainingDistance = math.max(0, remainingDistance - distance)
-        return TweenTo(target - Vector3.new(0, 3, 0), false, speed)
-    end
-    if not timedMove(dropPoint, 3.5) then
-        warn("[EggHub] ไปยังจุดวางไข่ไม่สำเร็จ")
-        return false
-    end
-    local dropEvent = ReplicatedStorage:FindFirstChild("Remotes")
-    dropEvent = dropEvent and dropEvent:FindFirstChild("Game")
-    dropEvent = dropEvent and dropEvent:FindFirstChild("BasketDrop")
-    if not dropEvent or not dropEvent:IsA("RemoteEvent") then
-        warn("[EggHub] ไม่พบ RemoteEvent BasketDrop; หยุดก่อนเข้าโซนบ้าน")
-        return false
-    end
-    -- เก็บรายการ prompt เดิม เพื่อให้เลือกจุดกดของไข่ที่เพิ่งวาง
-    local knownPrompts = {}
-    for _, instance in ipairs(workspace:GetDescendants()) do
-        if instance:IsA("ProximityPrompt") then knownPrompts[instance] = true end
-    end
-    local dropped = pcall(function() dropEvent:FireServer() end)
-    if not dropped then
-        warn("[EggHub] เรียก BasketDrop ไม่สำเร็จ")
-        return false
-    end
-
-    local function findDroppedPrompt()
-        local selected, bestScore
-        for _, prompt in ipairs(workspace:GetDescendants()) do
-            if prompt:IsA("ProximityPrompt") and prompt.Enabled then
-                local part = prompt:FindFirstAncestorWhichIsA("BasePart")
-                if part then
-                    local distance = (part.Position - dropPoint).Magnitude
-                    local label = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. part.Name):lower()
-                    local matchesEgg = label:find("egg", 1, true)
-                        or label:find("ไข่", 1, true)
-                        or label:find(eggName:lower(), 1, true)
-                    if distance <= 25 and (not knownPrompts[prompt] or matchesEgg) then
-                        local score = distance + (knownPrompts[prompt] and 15 or 0)
-                        if not bestScore or score < bestScore then
-                            selected, bestScore = prompt, score
-                        end
-                    end
-                end
-            end
-        end
-        return selected
-    end
-
-    local prompt
-    local promptDeadline = math.min(deadline - 1.5, tick() + 3)
-    while tick() < promptDeadline and Config.AutoEgg do
-        prompt = findDroppedPrompt()
-        if prompt then break end
-        task.wait(0.1)
-    end
-    if not prompt then
-        warn("[EggHub] ไข่ที่วางยังไม่มี ProximityPrompt ให้กด E; หยุดก่อนเข้าโซนบ้าน")
-        return false
-    end
-    local promptPart = prompt:FindFirstAncestorWhichIsA("BasePart")
     local root = GetHumanoidRootPart()
-    if not promptPart or not root then return false end
-    if (root.Position - promptPart.Position).Magnitude > math.max(2, prompt.MaxActivationDistance - 1) then
-        if not timedMove(promptPart.Position + Vector3.new(0, 2.5, 0), 1.5) then return false end
-    end
-    local triggered = false
-    local connection = prompt.Triggered:Connect(function(player)
-        if player == LocalPlayer then triggered = true end
-    end)
-    for attempt = 1, 3 do
-        if tick() >= deadline - 0.5 or not Config.AutoEgg then break end
-        local hold = math.max(prompt.HoldDuration + 0.3, 0.7)
-        print("[EggHub] กำลังกดเก็บไข่ที่วาง:", eggName, "| ครั้ง:", attempt, "| ถือ E:", hold)
-        local focused = UserInputService:GetFocusedTextBox()
-        if focused then focused:ReleaseFocus() end
-        local ok = pcall(function() prompt:InputHoldBegin() end)
-        if not ok then
-            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-        end
-        task.wait(hold)
-        if ok then
-            pcall(function() prompt:InputHoldEnd() end)
-        else
-            ReleaseE()
-        end
-        local updateDeadline = math.min(deadline - 0.5, tick() + 0.5)
-        repeat
-            task.wait(0.1)
-        until tick() >= updateDeadline or not prompt.Parent or not prompt.Enabled
-            or not promptPart:IsDescendantOf(workspace)
-        if not prompt.Parent or not prompt.Enabled
-            or not promptPart:IsDescendantOf(workspace) then break end
-    end
-    connection:Disconnect()
-    local pickedUp = not prompt.Parent or not prompt.Enabled
-        or not promptPart:IsDescendantOf(workspace)
-    if not pickedUp then
-        warn("[EggHub] กด E แล้ว แต่ไข่ที่วางยังอยู่ (PromptTriggered:", triggered,
-            "); หยุดก่อนเข้าโซนบ้าน")
+    if not root then return false end
+    -- Test: carry the collected egg straight home; do not call BasketDrop.
+    local secondsLeft = (collectedAt or tick()) + 18 - tick()
+    local distance = (root.Position - (home + Vector3.new(0, 3, 0))).Magnitude
+    local speed = eggName and math.max(140, distance / math.max(secondsLeft - 0.5, 0.1)) or 140
+    if eggName and secondsLeft <= 0.5 then
+        warn("[EggHub] เวลากลับบ้าน 18 วินาทีหมดแล้ว:", eggName)
         return false
     end
-    if not Config.AutoEgg then return false end
-    print("[EggHub] เก็บไข่ที่วางแล้ว กำลังเข้าโซนบ้าน:", eggName)
-    local arrived = timedMove(home + Vector3.new(0, 3, 0), 0)
-    if arrived then
-        task.wait(0.15)
-        local root = GetHumanoidRootPart()
-        arrived = root ~= nil and (root.Position - home).Magnitude <= 30
-        if arrived and tick() > deadline then
-            warn("[EggHub] ถึงบ้านเกิน 18 วินาที; เกมอาจคืนไข่")
-            return false
-        end
-        if arrived then
-            print("[EggHub] ถึงบ้านหลังเก็บไข่", math.floor((tick() - (collectedAt or tick())) * 10) / 10, "วินาที")
-        else
-            warn("[EggHub] เกมดึงตัวกลับก่อนถึงโซนบ้าน")
-        end
+    if eggName and not Config.AutoEgg then return false end
+    local moved = TweenTo(home, not eggName, speed)
+    if not moved then return false end
+    task.wait(0.15)
+    root = GetHumanoidRootPart()
+    local arrived = root ~= nil and (root.Position - home).Magnitude <= 30
+    if eggName then
+        print("[EggHub] กลับบ้านโดยไม่ Drop:", eggName, "| ถึง:", arrived,
+            "| ใช้เวลา:", math.floor((tick() - (collectedAt or tick())) * 10) / 10)
     end
     return arrived
 end
