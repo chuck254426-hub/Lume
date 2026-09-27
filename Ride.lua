@@ -500,11 +500,11 @@ local function GetEggTopPosition(egg)
     return GetObjectPosition(egg)
 end
 
-local function TweenToVolcanicEgg(egg, testOnly)
+local function TweenToVolcanicEgg(egg)
     print("[Volcanic Route v34] เส้นทางไข่จริง | ความเร็วแยกจากช่อง UI")
-    if not Config.AutoEgg or (not testOnly and (not egg or egg.Name ~= "Volcanic Egg")) then return false end
+    if not Config.AutoEgg or not egg or egg.Name ~= "Volcanic Egg" then return false end
     local folder = GetEggFolder()
-    if not testOnly and (not folder or egg.Parent ~= folder) then
+    if not folder or egg.Parent ~= folder then
         warn("[Volcanic] ยังไม่มีไข่จริงใน RenderedEggs")
         return false
     end
@@ -973,31 +973,8 @@ local function TweenToVolcanicEgg(egg, testOnly)
     if not zone then warn("[Volcanic Route v34] ไม่พบโซน VolcanoIsland.volcano") end
     zoneConnection = RunService.Heartbeat:Connect(updateZoneSpeed)
     updateZoneSpeed()
-    -- The working v32 route disables character collisions after the entrance.
-    -- Keep it scoped to this route and restore each part on every exit.
-    local collisionState = {}
-    local noclipConnection
-    local function enableRouteNoclip()
-        local character = LocalPlayer.Character
-        if not character or noclipConnection then return end
-        noclipConnection = RunService.Stepped:Connect(function()
-            if LocalPlayer.Character ~= character then return end
-            for _, part in ipairs(character:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    if collisionState[part] == nil then
-                        collisionState[part] = part.CanCollide
-                    end
-                    part.CanCollide = false
-                end
-            end
-        end)
-    end
     local function finish(ok)
         if zoneConnection then zoneConnection:Disconnect(); zoneConnection = nil end
-        if noclipConnection then noclipConnection:Disconnect(); noclipConnection = nil end
-        for part, wasCollidable in pairs(collisionState) do
-            if part.Parent then part.CanCollide = wasCollidable end
-        end
         return ok
     end
     local function moveTo(target, label, precise)
@@ -1013,7 +990,7 @@ local function TweenToVolcanicEgg(egg, testOnly)
         end
         local previousDistance = math.huge
         for attempt = 1, 4 do
-            if not Config.AutoEgg or (not testOnly and egg.Parent ~= folder) then return false end
+            if not Config.AutoEgg or egg.Parent ~= folder then return false end
             local now = GetHumanoidRootPart()
             if not now then return false end
             local distance = (target - now.Position).Magnitude
@@ -1057,20 +1034,26 @@ local function TweenToVolcanicEgg(egg, testOnly)
             print("[Volcanic] จุดทางเดิน", index, "/", #route, "| เป้าหมาย:", position)
         end
         if not moveTo(position, "จุดเดิน " .. index, true) then return finish(false) end
-        if index == 1 then enableRouteNoclip() end
     end
     -- จุดสุดท้ายในไฟล์บันทึกอาจอยู่ห่างจุดเกิดไข่: เดินไปยัง Part หลังผ่านเส้นทาง
     if not moveTo(GetObjectPosition(eggSpawn) + Vector3.new(0, 2.5, 0), "EggSpawns.Volcanic") then
         return finish(false)
     end
-    if testOnly then return finish(true) end
-    -- Once through the Volcanic route, approach the real egg using the same
-    -- arrival logic as other eggs. CollectEggUntilSuccess handles E and return.
+    -- หลังเข้าทางประตูแล้ว จึงไปยังไข่จริงที่ RenderedEggs
     local top = GetEggTopPosition(egg)
-    if not top or not TweenTo(top, false, volcanicSpeed) then
+    if not top or not moveTo(top + Vector3.new(0, 2.5, 0), "RenderedEggs.Volcanic Egg") then
         return finish(false)
     end
-    return finish(true)
+    local destination = top + Vector3.new(0, 2.5, 0)
+    root = GetHumanoidRootPart()
+    if not root or (root.Position - destination).Magnitude > 12 then return finish(false) end
+    task.wait(0.4)
+    root = GetHumanoidRootPart()
+    top = GetEggTopPosition(egg)
+    -- ตำแหน่งโมเดลไข่และตำแหน่ง prompt อาจไม่อยู่จุดเดียวกัน
+    -- ให้ขั้นตอนกด E ลองต่อเมื่ออยู่ใกล้ไข่ แทนการยกเลิกจากคลาดเคลื่อนเล็กน้อย
+    return finish(root ~= nil and top ~= nil and egg.Parent == folder
+        and (root.Position - (top + Vector3.new(0, 2.5, 0))).Magnitude <= 12)
 end
 
 --======================================================
@@ -2315,39 +2298,6 @@ do
             if egg and position and CollectEggUntilSuccess(egg, position) then ReturnHome(egg.Name, LastCollectedTime) end
             Config.AutoEgg = previous
             Busy = false
-        end)
-    end)
-    local volcanicTestStatus = label(auto, "", UDim2.fromOffset(5, 304), UDim2.fromOffset(465, 16), textColor, 11)
-    button(auto, "Test Volcanic", UDim2.fromOffset(151, 275), UDim2.fromOffset(160, 30), function()
-        if Busy or Config.AutoEgg then
-            volcanicTestStatus.Text = "ปิด Auto Egg และรอให้งานปัจจุบันจบก่อน"
-            return
-        end
-        Busy = true
-        volcanicTestStatus.Text = "กำลังตรวจหาไข่ Volcanic..."
-        task.spawn(function()
-            -- Busy blocks the normal farm loop during this one-off test.
-            Config.AutoEgg = true
-            local ok, reached = pcall(function()
-                local folder = GetEggFolder()
-                local egg = folder and folder:FindFirstChild("Volcanic Egg")
-                if egg and GetObjectPosition(egg) then
-                    volcanicTestStatus.Text = "พบไข่จริง: กำลังเดิน เก็บ และกลับบ้าน..."
-                    if not CollectEggUntilSuccess(egg, GetObjectPosition(egg)) then
-                        return false
-                    end
-                    return ReturnHome(egg.Name, LastCollectedTime)
-                end
-                volcanicTestStatus.Text = "ไข่ยังไม่เกิด: ทดสอบเส้นทางถึงจุดเกิด..."
-                return TweenToVolcanicEgg(nil, true)
-            end)
-            Config.AutoEgg = false
-            StopTween()
-            ReleaseE()
-            Busy = false
-            volcanicTestStatus.Text = ok and (reached and "ทดสอบเสร็จ: ดู Output ว่าเก็บไข่หรือถึงจุดเกิด" or "ทดสอบไม่สำเร็จ: ดู Output")
-                or "เกิดข้อผิดพลาด: ดู Output"
-            if not ok then warn("[Volcanic Test]", reached) end
         end)
     end)
     local tweenSpeedInput = line(auto, 320, "Tween Speed", Config.TweenSpeed, function(v)
